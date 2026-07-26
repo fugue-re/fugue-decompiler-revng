@@ -1,0 +1,4 @@
+[env]
+CXX = "clang++"
+CXXFLAGS = "-stdlib=libc++"
+CXXSTDLIB = "c++"
