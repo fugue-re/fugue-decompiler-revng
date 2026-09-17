@@ -191,7 +191,7 @@ impl Decompiler {
                     })
                     .collect::<Vec<CString>>();
                 manager.run_data_layout(&functions)?;
-                manager.run_analysis(c"initial", c"convert-functions-to-cabi", None)?;
+                manager.run_analysis(c"", c"convert-functions-to-cabi", None)?;
                 covered.extend(
                     context
                         .functions

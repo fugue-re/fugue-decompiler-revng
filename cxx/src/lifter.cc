@@ -26,6 +26,7 @@
 #include "revng/Support/IRBuilder.h"
 #include "revng/Support/IRHelperRegistry.h"
 #include "revng/Support/MetaAddress.h"
+#include "revng/Support/NewPC.h"
 
 namespace revng_fugue {
 
@@ -87,11 +88,11 @@ public:
     auto *NewPCType = llvm::FunctionType::get(
         llvm::Type::getVoidTy(Context),
         { Int8Ptr, llvm::Type::getInt64Ty(Context),
-          llvm::Type::getInt32Ty(Context), llvm::Type::getInt32Ty(Context),
-          Int8Ptr },
-        false);
-    NewPCMarker = createIRHelper("newpc", M, NewPCType,
-                                 llvm::GlobalValue::ExternalLinkage);
+          llvm::Type::getInt32Ty(Context), Int8Ptr },
+        true);
+    NewPCMarker =
+        NewPCHelper.create(M, NewPCType, llvm::GlobalValue::ExternalLinkage)
+            .function();
     FunctionTags::Marker.addTo(NewPCMarker);
     NewPCMarker->addFnAttr(llvm::Attribute::WillReturn);
     NewPCMarker->addFnAttr(llvm::Attribute::NoUnwind);
@@ -103,7 +104,7 @@ public:
     JTM->harvestGlobalData();
 
     MetaAddress EntryPC = MetaAddress::fromPC(Arch, Entry);
-    JTM->registerJT(EntryPC, JTReason::GlobalData);
+    JTM->registerJT(EntryPC, JumpTargetReason::GlobalData);
     PCH->initializePC(Builder, EntryPC);
 
     auto *Int8 = Builder.getInt8Ty();
@@ -223,13 +224,11 @@ void fugue_lifter_new_pc(std::uintptr_t State, std::uintptr_t BlockValue,
   MetaAddress PC = MetaAddress::fromPC(Lifter->Architecture, Address);
   auto *Block = llvm::unwrap(reinterpret_cast<LLVMBasicBlockRef>(BlockValue));
   revng::IRBuilder Builder(Block);
-  auto *Int8Ptr = llvm::PointerType::get(Context, 0);
   llvm::Value *Arguments[] = {
     BasicBlockID(PC).toValue(&Lifter->Module),
     Builder.getInt64(Size),
     Builder.getInt32(-1),
-    Builder.getInt32(0),
-    llvm::ConstantPointerNull::get(Int8Ptr)
+    MetaAddress::invalid().toValue(&Lifter->Module)
   };
   auto *Call = Builder.CreateCall(Lifter->NewPCMarker, Arguments);
   if (not IsFirst)
@@ -277,9 +276,9 @@ void fugue_lifter_exit_call(std::uintptr_t State, std::uintptr_t BlockValue,
   llvm::BasicBlock *CalleeBlock = IsImport ?
                                       nullptr :
                                       Lifter->JTM->registerJT(TargetPC,
-                                                              JTReason::Callee);
+                                                              JumpTargetReason::Callee);
   llvm::BasicBlock *ReturnBlock =
-      Lifter->JTM->registerJT(ReturnPC, JTReason::ReturnAddress);
+      Lifter->JTM->registerJT(ReturnPC, JumpTargetReason::ReturnAddress);
 
   if (not IsImport)
     Lifter->PCH->setPC(Builder, TargetPC);
@@ -322,7 +321,7 @@ void fugue_lifter_register_direct_jumps(std::uintptr_t State) {
     auto &&[Result, NextPC] = Lifter->PCH->getUniqueJumpTarget(ExitBlock);
     if (Result == NextJumpTarget::Unique && Lifter->JTM->isPC(NextPC)
         && not Lifter->JTM->hasJT(NextPC))
-      Lifter->JTM->registerJT(NextPC, JTReason::DirectJump);
+      Lifter->JTM->registerJT(NextPC, JumpTargetReason::DirectJump);
   }
   Lifter->ExitBlocks.clear();
 }
@@ -330,7 +329,7 @@ void fugue_lifter_register_direct_jumps(std::uintptr_t State) {
 void fugue_lifter_finalize(std::uintptr_t State) {
   auto *Lifter = reinterpret_cast<FugueLifter *>(State);
   Lifter->JTM->finalizeJumpTargets();
-  Lifter->JTM->createJTReasonMD();
+  Lifter->JTM->createJumpTargetReasonMD();
 
   llvm::SmallVector<llvm::CallInst *, 4> ToErase;
   for (llvm::User *User : Lifter->Identity->users()) {

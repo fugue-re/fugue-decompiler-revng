@@ -102,8 +102,7 @@ void emit_unsupported(std::uintptr_t BlockValue, rust::Str Name,
 }
 
 rust::String default_pipeline() {
-  auto Path = revng::ResourceFinder.findFile("share/revng/pipelines/"
-                                             "revng-pipelines.yml");
+  auto Path = revng::ResourceFinder.findFile("share/revng/pipeline.yml");
   if (not Path or Path->empty())
     return rust::String();
   return rust::String(*Path);

@@ -1,5 +1,5 @@
 [package]
-name = "fugue-decompiler-revng"
+name = "revng-fugue"
 version = "0.1.0"
 edition = "2024"
 description = "Decompilation of fugue-lifted binaries via the revng pipeline"

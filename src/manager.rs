@@ -186,14 +186,14 @@ impl Manager {
     }
 
     pub(crate) fn produce_root(&mut self) -> Result<(), Error> {
-        let step = unsafe { rp_manager_get_step_from_name(self.manager, c"lift".as_ptr()) };
+        let step = unsafe { rp_manager_get_step_from_name(self.manager, c"lifted".as_ptr()) };
         let identifier = unsafe {
-            rp_manager_get_container_identifier_from_name(self.manager, c"root.bc.zstd".as_ptr())
+            rp_manager_get_container_identifier_from_name(self.manager, c"llvm-root".as_ptr())
         };
-        let kind = unsafe { rp_manager_get_kind_from_name(self.manager, c"root".as_ptr()) };
+        let kind = unsafe { rp_manager_get_kind_from_name(self.manager, c"binary".as_ptr()) };
         if step.is_null() || identifier.is_null() || kind.is_null() {
             return Err(Error::pipeline(
-                "revng is missing the lift step or root kind",
+                "revng is missing the lifted savepoint or binary kind",
             ));
         }
         let container = unsafe { rp_step_get_container(step, identifier) };
@@ -219,14 +219,14 @@ impl Manager {
     }
 
     pub(crate) fn detect_abi(&mut self) -> Result<(), Error> {
-        let step = unsafe { rp_manager_get_step_from_name(self.manager, c"lift".as_ptr()) };
+        let step = unsafe { rp_manager_get_step_from_name(self.manager, c"lifted".as_ptr()) };
         let identifier = unsafe {
-            rp_manager_get_container_identifier_from_name(self.manager, c"root.bc.zstd".as_ptr())
+            rp_manager_get_container_identifier_from_name(self.manager, c"llvm-root".as_ptr())
         };
-        let kind = unsafe { rp_manager_get_kind_from_name(self.manager, c"root".as_ptr()) };
+        let kind = unsafe { rp_manager_get_kind_from_name(self.manager, c"binary".as_ptr()) };
         if step.is_null() || identifier.is_null() || kind.is_null() {
             return Err(Error::pipeline(
-                "revng is missing the lift step or root kind",
+                "revng is missing the lifted savepoint or binary kind",
             ));
         }
         let container = unsafe { rp_step_get_container(step, identifier) };
@@ -234,7 +234,7 @@ impl Manager {
         let target = unsafe { rp_target_create(kind, 0, components.as_ptr()) };
         let map = unsafe { rp_container_targets_map_create() };
         unsafe { rp_container_targets_map_add(map, container, target) };
-        let result = self.run_analysis(c"lift", c"detect-abi", Some(map.cast_const()));
+        let result = self.run_analysis(c"lifted", c"detect-abi", Some(map.cast_const()));
         unsafe {
             rp_container_targets_map_destroy(map);
             rp_target_destroy(target);
@@ -243,20 +243,16 @@ impl Manager {
     }
 
     pub(crate) fn run_data_layout(&mut self, functions: &[CString]) -> Result<(), Error> {
-        let step =
-            unsafe { rp_manager_get_step_from_name(self.manager, c"make-segment-ref".as_ptr()) };
+        let step = unsafe {
+            rp_manager_get_step_from_name(self.manager, c"segregate-stack-accesses".as_ptr())
+        };
         let identifier = unsafe {
-            rp_manager_get_container_identifier_from_name(
-                self.manager,
-                c"functions.bc.zstd".as_ptr(),
-            )
+            rp_manager_get_container_identifier_from_name(self.manager, c"llvm-functions".as_ptr())
         };
-        let kind = unsafe {
-            rp_manager_get_kind_from_name(self.manager, c"stack-accesses-segregated".as_ptr())
-        };
+        let kind = unsafe { rp_manager_get_kind_from_name(self.manager, c"function".as_ptr()) };
         if step.is_null() || identifier.is_null() || kind.is_null() {
             return Err(Error::pipeline(
-                "revng is missing the make-segment-ref step or stack-accesses-segregated kind",
+                "revng is missing the segregate-stack-accesses savepoint or function kind",
             ));
         }
         let container = unsafe { rp_step_get_container(step, identifier) };
@@ -271,7 +267,7 @@ impl Manager {
             })
             .collect::<Vec<_>>();
         let result = self.run_analysis(
-            c"make-segment-ref",
+            c"segregate-stack-accesses",
             c"analyze-data-layout",
             Some(map.cast_const()),
         );
