@@ -1,5 +1,7 @@
 FROM rust:trixie
 
+SHELL ["/bin/bash", "-c"]
+
 RUN apt-get update -qq \
  && apt-get install -y --no-install-recommends \
       cmake ninja-build clang clang-format \
