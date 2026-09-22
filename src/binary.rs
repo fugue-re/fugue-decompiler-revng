@@ -32,6 +32,7 @@ impl fmt::Display for Address {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Architecture {
     AArch64,
+    X86,
     X86_64,
 }
 
@@ -39,6 +40,7 @@ impl Architecture {
     pub(crate) fn revng_name(self) -> &'static str {
         match self {
             Self::AArch64 => "aarch64",
+            Self::X86 => "x86",
             Self::X86_64 => "x86_64",
         }
     }
@@ -46,6 +48,7 @@ impl Architecture {
     pub(crate) fn tag_id(self) -> u8 {
         match self {
             Self::AArch64 => 1,
+            Self::X86 => 2,
             Self::X86_64 => 0,
         }
     }
@@ -53,6 +56,7 @@ impl Architecture {
     pub(crate) fn pc_csv(self) -> &'static str {
         match self {
             Self::AArch64 => "_pc",
+            Self::X86 => "_eip",
             Self::X86_64 => "_rip",
         }
     }
@@ -60,6 +64,7 @@ impl Architecture {
     pub(crate) fn stack_pointer_csv(self) -> &'static str {
         match self {
             Self::AArch64 => "_sp",
+            Self::X86 => "_esp",
             Self::X86_64 => "_rsp",
         }
     }
@@ -67,19 +72,20 @@ impl Architecture {
     pub(crate) fn link_register_csv(self) -> Option<&'static str> {
         match self {
             Self::AArch64 => Some("_lr"),
-            Self::X86_64 => None,
+            Self::X86 | Self::X86_64 => None,
         }
     }
 
     pub(crate) fn minimum_instruction_size(self) -> u8 {
         match self {
             Self::AArch64 => 4,
-            Self::X86_64 => 1,
+            Self::X86 | Self::X86_64 => 1,
         }
     }
 
     pub(crate) fn pointer_size(self) -> u64 {
         match self {
+            Self::X86 => 4,
             Self::AArch64 | Self::X86_64 => 8,
         }
     }
@@ -87,6 +93,7 @@ impl Architecture {
     pub(crate) fn default_abi(self) -> &'static str {
         match self {
             Self::AArch64 => "AAPCS64",
+            Self::X86 => "Microsoft_x86_cdecl",
             Self::X86_64 => "SystemV_x86_64",
         }
     }
@@ -94,6 +101,7 @@ impl Architecture {
     fn language_id(self) -> &'static str {
         match self {
             Self::AArch64 => "AARCH64:LE:64:v8A",
+            Self::X86 => "x86:LE:32",
             Self::X86_64 => "x86:LE:64",
         }
     }
@@ -101,6 +109,7 @@ impl Architecture {
     fn from_language(processor: &str, bits: u32) -> Option<Self> {
         match (processor, bits) {
             ("AARCH64", 64) => Some(Self::AArch64),
+            ("x86", 32) => Some(Self::X86),
             ("x86", 64) => Some(Self::X86_64),
             _ => None,
         }

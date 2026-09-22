@@ -5,6 +5,8 @@ use fugue_core::storage::segments::SegmentStorageError;
 pub enum Error {
     #[error("failed to build the segment address space")]
     AddressSpace(#[from] SegmentStorageError),
+    #[error("code generation failed: {message}")]
+    CodeGen { message: String },
     #[error("failed to load the binary")]
     Loader(#[from] LoaderError),
     #[error("revng pipeline error: {message}")]
@@ -14,6 +16,12 @@ pub enum Error {
 }
 
 impl Error {
+    pub(crate) fn codegen(message: impl Into<String>) -> Self {
+        Self::CodeGen {
+            message: message.into(),
+        }
+    }
+
     pub(crate) fn pipeline(message: impl Into<String>) -> Self {
         Self::Pipeline {
             message: message.into(),

@@ -1,5 +1,3 @@
-mod registers;
-
 use std::cmp::Ordering;
 use std::num::NonZeroU32;
 
@@ -10,22 +8,25 @@ use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::ContextRef;
 use inkwell::module::{Linkage, Module};
 use inkwell::support::LLVMString;
-use inkwell::types::IntType;
+use inkwell::types::{BasicMetadataTypeEnum, IntType};
 use inkwell::values::{
     AsValueRef, BasicMetadataValueEnum, FunctionValue, GlobalValue, InstructionValue, IntValue,
+    PointerValue,
 };
 use inkwell::{AddressSpace, IntPredicate};
 use rustc_hash::{FxHashMap, FxHashSet};
+use thiserror::Error;
 
-use crate::binary::{Architecture, Binary};
+use crate::binary::{Address, Architecture, Binary};
 use crate::bridge;
 use crate::lifter::FugueLifter;
 
+mod registers;
 pub(crate) use registers::RegisterFile;
 
 const MAX_INSTRUCTION_BYTES: usize = 16;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub(crate) enum TranslateError {
     #[error("LLVM builder error")]
     Builder(#[from] BuilderError),
@@ -122,14 +123,46 @@ pub(crate) fn lift<'ctx>(
     imports: &FxHashMap<u64, String>,
     binary: &Binary,
     lifter: &mut FugueLifter<'ctx>,
-) -> Result<FxHashSet<u64>, TranslateError> {
-    let mut translator = Translator::new(module, architecture, registers, imports)?;
+    entry: u64,
+    max_depth: Option<u32>,
+) -> Result<LiftOutcome, TranslateError> {
+    let mut translator =
+        Translator::new(module, architecture, registers, imports, entry, max_depth)?;
     let mut fugue = binary.lifter();
     while let Some((address, block)) = lifter.peek() {
+        translator.depth = translator.depths.get(&address).copied().unwrap_or(0);
         translator.translate_block(lifter, block, address, binary, &mut fugue)?;
-        lifter.register_direct_jumps();
+        for target in lifter.register_direct_jumps() {
+            translator.depths.entry(target).or_insert(translator.depth);
+        }
     }
-    Ok(translator.callees)
+    Ok(LiftOutcome {
+        callees: translator.callees,
+        lifted: translator.lifted,
+        untranslated: translator.untranslated,
+    })
+}
+
+pub(crate) struct LiftOutcome {
+    pub(crate) callees: FxHashSet<u64>,
+    pub(crate) lifted: FxHashSet<u64>,
+    pub(crate) untranslated: Vec<Untranslated>,
+}
+
+#[derive(Clone)]
+pub struct Untranslated {
+    address: Address,
+    reason: String,
+}
+
+impl Untranslated {
+    pub fn address(&self) -> Address {
+        self.address
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
 }
 
 struct Translator<'a, 'ctx> {
@@ -143,6 +176,11 @@ struct Translator<'a, 'ctx> {
     values: FxHashMap<Varnode, IntValue<'ctx>>,
     root: FunctionValue<'ctx>,
     callees: FxHashSet<u64>,
+    lifted: FxHashSet<u64>,
+    untranslated: Vec<Untranslated>,
+    depths: FxHashMap<u64, u32>,
+    depth: u32,
+    max_depth: Option<u32>,
 }
 
 impl<'a, 'ctx> Translator<'a, 'ctx> {
@@ -151,10 +189,16 @@ impl<'a, 'ctx> Translator<'a, 'ctx> {
         architecture: Architecture,
         registers: &'a RegisterFile<'a>,
         imports: &'a FxHashMap<u64, String>,
+        entry: u64,
+        max_depth: Option<u32>,
     ) -> Result<Self, TranslateError> {
         let root = module
             .get_function("root")
             .ok_or(TranslateError::MissingRoot)?;
+        let mut depths = FxHashMap::default();
+        depths.insert(entry, 0);
+        let mut lifted = FxHashSet::default();
+        lifted.insert(entry);
         Ok(Self {
             module,
             context: module.get_context(),
@@ -166,6 +210,11 @@ impl<'a, 'ctx> Translator<'a, 'ctx> {
             values: FxHashMap::default(),
             root,
             callees: FxHashSet::default(),
+            lifted,
+            untranslated: Vec::new(),
+            depths,
+            depth: 0,
+            max_depth,
         })
     }
 
@@ -218,7 +267,11 @@ impl<'a, 'ctx> Translator<'a, 'ctx> {
         self.values.clear();
         match self.translate_operations(lifter, block, instruction) {
             Ok(terminated) => Ok(terminated),
-            Err(_) => {
+            Err(reason) => {
+                self.untranslated.push(Untranslated {
+                    address: Address::new(instruction.address),
+                    reason: reason.to_string(),
+                });
                 self.rewind(block, checkpoint);
                 self.emit_opaque(instruction)?;
                 Ok(false)
@@ -420,12 +473,19 @@ impl<'a, 'ctx> Translator<'a, 'ctx> {
             .architecture
             .link_register_csv()
             .map(|name| self.csv(name, 8).as_pointer_value());
+        let follow = self.max_depth.is_none_or(|limit| self.depth < limit);
+        if follow {
+            self.depths.entry(target.offset()).or_insert(self.depth + 1);
+            self.lifted.insert(target.offset());
+        }
+        self.depths.entry(instruction.fall()).or_insert(self.depth);
         lifter.exit_call(
             block,
             target.offset(),
             instruction.fall(),
             link_register,
             symbol.is_some(),
+            follow,
         );
         if let Some(symbol) = &symbol {
             let terminator = block
@@ -468,11 +528,7 @@ impl<'a, 'ctx> Translator<'a, 'ctx> {
                 let address = self.read(&inputs[0])?;
                 let output = operation.output().ok_or(TranslateError::MissingOutput)?;
                 let element = self.int_type(output.size() as u16);
-                let pointer = self.builder.build_int_to_ptr(
-                    address,
-                    self.context.ptr_type(AddressSpace::default()),
-                    "",
-                )?;
+                let pointer = self.ptr_from_address(address)?;
                 let value = self
                     .builder
                     .build_load(element, pointer, "")?
@@ -482,11 +538,7 @@ impl<'a, 'ctx> Translator<'a, 'ctx> {
             Op::Store(_) => {
                 let address = self.read(&inputs[0])?;
                 let value = self.read(&inputs[1])?;
-                let pointer = self.builder.build_int_to_ptr(
-                    address,
-                    self.context.ptr_type(AddressSpace::default()),
-                    "",
-                )?;
+                let pointer = self.ptr_from_address(address)?;
                 self.builder.build_store(pointer, value)?;
                 Ok(())
             }
@@ -504,12 +556,12 @@ impl<'a, 'ctx> Translator<'a, 'ctx> {
             Op::IntAnd | Op::BoolAnd => self.arithmetic(operation, |b, l, r| b.build_and(l, r, "")),
             Op::IntOr | Op::BoolOr => self.arithmetic(operation, |b, l, r| b.build_or(l, r, "")),
             Op::IntXor | Op::BoolXor => self.arithmetic(operation, |b, l, r| b.build_xor(l, r, "")),
-            Op::IntLeftShift => self.arithmetic(operation, |b, l, r| b.build_left_shift(l, r, "")),
+            Op::IntLeftShift => self.shift(operation, |b, l, r| b.build_left_shift(l, r, "")),
             Op::IntRightShift => {
-                self.arithmetic(operation, |b, l, r| b.build_right_shift(l, r, false, ""))
+                self.shift(operation, |b, l, r| b.build_right_shift(l, r, false, ""))
             }
             Op::IntSignedRightShift => {
-                self.arithmetic(operation, |b, l, r| b.build_right_shift(l, r, true, ""))
+                self.shift(operation, |b, l, r| b.build_right_shift(l, r, true, ""))
             }
             Op::IntEq => self.compare(operation, IntPredicate::EQ),
             Op::IntNotEq => self.compare(operation, IntPredicate::NE),
@@ -565,8 +617,60 @@ impl<'a, 'ctx> Translator<'a, 'ctx> {
             }
             Op::CountOnes => self.count(operation, "llvm.ctpop"),
             Op::CountLeadingZeros => self.count(operation, "llvm.ctlz"),
+            Op::FloatAdd => self.float_binary(operation, "float_add"),
+            Op::FloatSub => self.float_binary(operation, "float_sub"),
+            Op::FloatMul => self.float_binary(operation, "float_mul"),
+            Op::FloatDiv => self.float_binary(operation, "float_div"),
+            Op::FloatNeg => self.float_unary(operation, "float_neg"),
+            Op::FloatAbs => self.float_unary(operation, "float_abs"),
+            Op::FloatSqrt => self.float_unary(operation, "float_sqrt"),
+            Op::FloatCeiling => self.float_unary(operation, "float_ceiling"),
+            Op::FloatFloor => self.float_unary(operation, "float_floor"),
+            Op::FloatRound => self.float_unary(operation, "float_round"),
+            Op::FloatIsNaN => self.float_predicate(operation, "float_is_nan"),
+            Op::FloatEq => self.float_predicate(operation, "float_eq"),
+            Op::FloatNotEq => self.float_predicate(operation, "float_not_eq"),
+            Op::FloatLess => self.float_predicate(operation, "float_less"),
+            Op::FloatLessEq => self.float_predicate(operation, "float_less_eq"),
+            Op::IntToFloat => self.float_convert(operation, "int_to_float"),
+            Op::FloatToInt => self.float_convert(operation, "float_to_int"),
+            Op::FloatToFloat => self.float_convert(operation, "float_to_float"),
             other => Err(TranslateError::Unsupported(other)),
         }
+    }
+
+    fn shift(
+        &mut self,
+        operation: &PCodeOp,
+        build: impl Fn(
+            &Builder<'ctx>,
+            IntValue<'ctx>,
+            IntValue<'ctx>,
+        ) -> Result<IntValue<'ctx>, BuilderError>,
+    ) -> Result<(), TranslateError> {
+        let inputs = operation.inputs();
+        let value = self.read(&inputs[0])?;
+        let amount = self.read(&inputs[1])?;
+        let target = value.get_type();
+        let amount = match amount
+            .get_type()
+            .get_bit_width()
+            .cmp(&target.get_bit_width())
+        {
+            Ordering::Equal => amount,
+            Ordering::Less => self.builder.build_int_z_extend(amount, target, "")?,
+            Ordering::Greater => self.builder.build_int_truncate(amount, target, "")?,
+        };
+        let width = target.const_int(u64::from(target.get_bit_width()), false);
+        let in_range = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, amount, width, "")?;
+        let shifted = build(&self.builder, value, amount)?;
+        let result = self
+            .builder
+            .build_select(in_range, shifted, target.const_zero(), "")?
+            .into_int_value();
+        self.write(operation, result)
     }
 
     fn arithmetic(
@@ -653,6 +757,69 @@ impl<'a, 'ctx> Translator<'a, 'ctx> {
         self.write(operation, result)
     }
 
+    fn float_helper(
+        &self,
+        name: &str,
+        target: IntType<'ctx>,
+        arguments: &[IntValue<'ctx>],
+    ) -> Result<IntValue<'ctx>, TranslateError> {
+        let function = self.module.get_function(name).unwrap_or_else(|| {
+            let parameters = arguments
+                .iter()
+                .map(|argument| argument.get_type().into())
+                .collect::<Vec<BasicMetadataTypeEnum>>();
+            let function = self
+                .module
+                .add_function(name, target.fn_type(&parameters, false), None);
+            unsafe { bridge::tag_pure_helper(raw(function)) };
+            function
+        });
+        let arguments = arguments
+            .iter()
+            .map(|argument| (*argument).into())
+            .collect::<Vec<BasicMetadataValueEnum>>();
+        let call = self.builder.build_call(function, &arguments, "")?;
+        Ok(call.try_as_basic_value().unwrap_basic().into_int_value())
+    }
+
+    fn float_binary(&mut self, operation: &PCodeOp, name: &str) -> Result<(), TranslateError> {
+        let inputs = operation.inputs();
+        let left = self.read(&inputs[0])?;
+        let right = self.read(&inputs[1])?;
+        let helper = format!("{name}_{}", inputs[0].size());
+        let result = self.float_helper(&helper, left.get_type(), &[left, right])?;
+        self.write(operation, result)
+    }
+
+    fn float_unary(&mut self, operation: &PCodeOp, name: &str) -> Result<(), TranslateError> {
+        let input = &operation.inputs()[0];
+        let value = self.read(input)?;
+        let helper = format!("{name}_{}", input.size());
+        let result = self.float_helper(&helper, value.get_type(), &[value])?;
+        self.write(operation, result)
+    }
+
+    fn float_predicate(&mut self, operation: &PCodeOp, name: &str) -> Result<(), TranslateError> {
+        let inputs = operation.inputs();
+        let mut values = vec![self.read(&inputs[0])?];
+        if inputs.len() > 1 {
+            values.push(self.read(&inputs[1])?);
+        }
+        let helper = format!("{name}_{}", inputs[0].size());
+        let result = self.float_helper(&helper, self.context.bool_type(), &values)?;
+        self.write_bool(operation, result)
+    }
+
+    fn float_convert(&mut self, operation: &PCodeOp, name: &str) -> Result<(), TranslateError> {
+        let input = &operation.inputs()[0];
+        let value = self.read(input)?;
+        let output = operation.output().ok_or(TranslateError::MissingOutput)?;
+        let target = self.int_type(output.size() as u16);
+        let helper = format!("{name}_{}_{}", input.size(), output.size());
+        let result = self.float_helper(&helper, target, &[value])?;
+        self.write(operation, result)
+    }
+
     fn count_intrinsic(
         &self,
         intrinsic: &str,
@@ -707,10 +874,33 @@ impl<'a, 'ctx> Translator<'a, 'ctx> {
             }
             return Ok(value);
         }
+        if self.registers.in_default_space(varnode) {
+            let pointer = self.absolute_pointer(varnode)?;
+            return Ok(self
+                .builder
+                .build_load(width, pointer, "")?
+                .into_int_value());
+        }
         self.values
             .get(varnode)
             .copied()
             .ok_or_else(|| TranslateError::temporary(varnode))
+    }
+
+    fn ptr_from_address(
+        &self,
+        address: IntValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, TranslateError> {
+        Ok(self.builder.build_int_to_ptr(
+            address,
+            self.context.ptr_type(AddressSpace::default()),
+            "",
+        )?)
+    }
+
+    fn absolute_pointer(&self, varnode: &Varnode) -> Result<PointerValue<'ctx>, TranslateError> {
+        let width = self.int_type(self.architecture.pointer_size() as u16);
+        self.ptr_from_address(width.const_int(varnode.offset(), false))
     }
 
     fn write(&mut self, operation: &PCodeOp, value: IntValue<'ctx>) -> Result<(), TranslateError> {
@@ -735,6 +925,11 @@ impl<'a, 'ctx> Translator<'a, 'ctx> {
         varnode: &Varnode,
         value: IntValue<'ctx>,
     ) -> Result<(), TranslateError> {
+        if self.registers.in_default_space(varnode) {
+            let pointer = self.absolute_pointer(varnode)?;
+            self.builder.build_store(pointer, value)?;
+            return Ok(());
+        }
         if varnode.space() != self.registers.space() {
             self.values.insert(*varnode, value);
             return Ok(());

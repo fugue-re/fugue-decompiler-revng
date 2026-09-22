@@ -5,10 +5,10 @@ mod ffi {
         include!("revng-fugue/cxx/include/lifter.h");
 
         unsafe fn tag_helper(function: usize);
+        unsafe fn tag_pure_helper(function: usize);
         unsafe fn tag_csv(global: usize);
         unsafe fn emit_unsupported(block: usize, name: &str, reads: &[usize], writes: &[usize]);
         unsafe fn emit_jump_to_symbol(terminator: usize, symbol: &str);
-        fn default_pipeline() -> String;
 
         unsafe fn fugue_lifter_new(
             model: usize,
@@ -18,6 +18,7 @@ mod ffi {
             pc_name: &str,
             sp_name: &str,
             entry: u64,
+            harvest_global_data: bool,
         ) -> usize;
         unsafe fn fugue_lifter_free(state: usize);
         unsafe fn fugue_lifter_peek(state: usize, address: &mut u64) -> usize;
@@ -38,15 +39,16 @@ mod ffi {
             return_address: u64,
             link_register: usize,
             is_import: bool,
+            follow_callee: bool,
         );
-        unsafe fn fugue_lifter_register_direct_jumps(state: usize);
+        unsafe fn fugue_lifter_register_direct_jumps(state: usize, registered: &mut Vec<u64>);
         unsafe fn fugue_lifter_finalize(state: usize);
     }
 }
 
 pub(crate) use ffi::{
-    default_pipeline, emit_jump_to_symbol, emit_unsupported, fugue_lifter_diverge,
-    fugue_lifter_exit_call, fugue_lifter_exit_constant, fugue_lifter_exit_dynamic,
-    fugue_lifter_finalize, fugue_lifter_free, fugue_lifter_new, fugue_lifter_new_pc,
-    fugue_lifter_peek, fugue_lifter_register_direct_jumps, tag_csv, tag_helper,
+    emit_jump_to_symbol, emit_unsupported, fugue_lifter_diverge, fugue_lifter_exit_call,
+    fugue_lifter_exit_constant, fugue_lifter_exit_dynamic, fugue_lifter_finalize,
+    fugue_lifter_free, fugue_lifter_new, fugue_lifter_new_pc, fugue_lifter_peek,
+    fugue_lifter_register_direct_jumps, tag_csv, tag_helper, tag_pure_helper,
 };

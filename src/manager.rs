@@ -9,13 +9,14 @@ use revng_sys::{
     rp_document_error_get_error_message, rp_document_error_reasons_count, rp_error,
     rp_error_create, rp_error_destroy, rp_error_get_document_error, rp_error_get_simple_error,
     rp_invalidations_create, rp_invalidations_destroy, rp_lifter_callbacks, rp_manager,
-    rp_manager_add_imported_function, rp_manager_create_cabi_type,
+    rp_manager_add_function, rp_manager_add_imported_function, rp_manager_create_cabi_type,
     rp_manager_create_from_address_space, rp_manager_decompile_function_to_ptml,
     rp_manager_destroy, rp_manager_get_container_identifier_from_name,
-    rp_manager_get_kind_from_name, rp_manager_get_step_from_name, rp_manager_produce_targets,
-    rp_manager_run_analysis, rp_manager_set_cabi_prototype, rp_manager_set_default_abi,
-    rp_manager_set_function_prototype, rp_set_lifter, rp_simple_error_get_message,
-    rp_step_get_container, rp_target, rp_target_create, rp_target_destroy, rp_typed_argument,
+    rp_manager_get_kind_from_name, rp_manager_get_step_from_name, rp_manager_produce_artefact,
+    rp_manager_produce_targets, rp_manager_run_analysis, rp_manager_set_cabi_prototype,
+    rp_manager_set_default_abi, rp_manager_set_function_prototype, rp_set_lifter,
+    rp_simple_error_get_message, rp_step_get_container, rp_target, rp_target_create,
+    rp_target_destroy, rp_typed_argument,
 };
 
 use crate::Import;
@@ -28,13 +29,24 @@ pub(crate) struct Manager {
 }
 
 impl Manager {
-    pub(crate) fn create(callbacks: &rp_address_space_callbacks) -> Result<Self, Error> {
+    pub(crate) fn create(
+        callbacks: &rp_address_space_callbacks,
+        pipeline: &CStr,
+    ) -> Result<Self, Error> {
         let error = unsafe { rp_error_create() };
         if error.is_null() {
             return Err(Error::pipeline("rp_error_create failed"));
         }
         let manager = unsafe {
-            rp_manager_create_from_address_space(callbacks, 0, 0, ptr::null(), c"".as_ptr(), error)
+            rp_manager_create_from_address_space(
+                callbacks,
+                pipeline.as_ptr(),
+                0,
+                0,
+                ptr::null(),
+                c"".as_ptr(),
+                error,
+            )
         };
         if manager.is_null() {
             let failure = error_message(error, "failed to create the revng manager");
@@ -61,6 +73,16 @@ impl Manager {
             Ok(())
         } else {
             Err(self.error("failed to install the lifter"))
+        }
+    }
+
+    pub(crate) fn add_function(&mut self, address: &CStr, name: &CStr) -> Result<(), Error> {
+        if unsafe {
+            rp_manager_add_function(self.manager, address.as_ptr(), name.as_ptr(), self.error)
+        } {
+            Ok(())
+        } else {
+            Err(self.error("failed to add the function"))
         }
     }
 
@@ -91,6 +113,7 @@ impl Manager {
         &mut self,
         address: &CStr,
         abi: &CStr,
+        name: &CStr,
         prototype: &Prototype,
         pointer_size: u64,
     ) -> Result<(), Error> {
@@ -105,7 +128,6 @@ impl Manager {
                 })
                 .collect::<Vec<_>>();
             let returns = returns.to_ffi();
-            let name = CString::new("function").expect("function name has no NUL");
             let set = unsafe {
                 rp_manager_set_cabi_prototype(
                     self.manager,
@@ -186,14 +208,14 @@ impl Manager {
     }
 
     pub(crate) fn produce_root(&mut self) -> Result<(), Error> {
-        let step = unsafe { rp_manager_get_step_from_name(self.manager, c"lift".as_ptr()) };
+        let step = unsafe { rp_manager_get_step_from_name(self.manager, c"lifted".as_ptr()) };
         let identifier = unsafe {
-            rp_manager_get_container_identifier_from_name(self.manager, c"root.bc.zstd".as_ptr())
+            rp_manager_get_container_identifier_from_name(self.manager, c"llvm-root".as_ptr())
         };
-        let kind = unsafe { rp_manager_get_kind_from_name(self.manager, c"root".as_ptr()) };
+        let kind = unsafe { rp_manager_get_kind_from_name(self.manager, c"binary".as_ptr()) };
         if step.is_null() || identifier.is_null() || kind.is_null() {
             return Err(Error::pipeline(
-                "revng is missing the lift step or root kind",
+                "revng is missing the lifted savepoint or binary kind",
             ));
         }
         let container = unsafe { rp_step_get_container(step, identifier) };
@@ -218,15 +240,40 @@ impl Manager {
         Ok(())
     }
 
-    pub(crate) fn detect_abi(&mut self) -> Result<(), Error> {
-        let step = unsafe { rp_manager_get_step_from_name(self.manager, c"lift".as_ptr()) };
-        let identifier = unsafe {
-            rp_manager_get_container_identifier_from_name(self.manager, c"root.bc.zstd".as_ptr())
+    pub(crate) fn produce_artefact(
+        &mut self,
+        step: &CStr,
+        container: &CStr,
+        kind: &CStr,
+        object: Option<&CStr>,
+    ) -> Result<Vec<u8>, Error> {
+        let components: [*const c_char; 1] = [object.map_or(ptr::null(), CStr::as_ptr)];
+        let buffer = unsafe {
+            rp_manager_produce_artefact(
+                self.manager,
+                step.as_ptr(),
+                container.as_ptr(),
+                kind.as_ptr(),
+                object.is_some() as u64,
+                components.as_ptr(),
+                self.error,
+            )
         };
-        let kind = unsafe { rp_manager_get_kind_from_name(self.manager, c"root".as_ptr()) };
+        if buffer.is_null() {
+            return Err(self.error("failed to produce the artefact"));
+        }
+        Ok(unsafe { take_buffer(buffer) })
+    }
+
+    pub(crate) fn detect_abi(&mut self) -> Result<(), Error> {
+        let step = unsafe { rp_manager_get_step_from_name(self.manager, c"lifted".as_ptr()) };
+        let identifier = unsafe {
+            rp_manager_get_container_identifier_from_name(self.manager, c"llvm-root".as_ptr())
+        };
+        let kind = unsafe { rp_manager_get_kind_from_name(self.manager, c"binary".as_ptr()) };
         if step.is_null() || identifier.is_null() || kind.is_null() {
             return Err(Error::pipeline(
-                "revng is missing the lift step or root kind",
+                "revng is missing the lifted savepoint or binary kind",
             ));
         }
         let container = unsafe { rp_step_get_container(step, identifier) };
@@ -234,7 +281,7 @@ impl Manager {
         let target = unsafe { rp_target_create(kind, 0, components.as_ptr()) };
         let map = unsafe { rp_container_targets_map_create() };
         unsafe { rp_container_targets_map_add(map, container, target) };
-        let result = self.run_analysis(c"lift", c"detect-abi", Some(map.cast_const()));
+        let result = self.run_analysis(c"lifted", c"detect-abi", Some(map.cast_const()));
         unsafe {
             rp_container_targets_map_destroy(map);
             rp_target_destroy(target);
@@ -243,20 +290,16 @@ impl Manager {
     }
 
     pub(crate) fn run_data_layout(&mut self, functions: &[CString]) -> Result<(), Error> {
-        let step =
-            unsafe { rp_manager_get_step_from_name(self.manager, c"make-segment-ref".as_ptr()) };
+        let step = unsafe {
+            rp_manager_get_step_from_name(self.manager, c"segregate-stack-accesses".as_ptr())
+        };
         let identifier = unsafe {
-            rp_manager_get_container_identifier_from_name(
-                self.manager,
-                c"functions.bc.zstd".as_ptr(),
-            )
+            rp_manager_get_container_identifier_from_name(self.manager, c"llvm-functions".as_ptr())
         };
-        let kind = unsafe {
-            rp_manager_get_kind_from_name(self.manager, c"stack-accesses-segregated".as_ptr())
-        };
+        let kind = unsafe { rp_manager_get_kind_from_name(self.manager, c"function".as_ptr()) };
         if step.is_null() || identifier.is_null() || kind.is_null() {
             return Err(Error::pipeline(
-                "revng is missing the make-segment-ref step or stack-accesses-segregated kind",
+                "revng is missing the segregate-stack-accesses savepoint or function kind",
             ));
         }
         let container = unsafe { rp_step_get_container(step, identifier) };
@@ -271,7 +314,7 @@ impl Manager {
             })
             .collect::<Vec<_>>();
         let result = self.run_analysis(
-            c"make-segment-ref",
+            c"segregate-stack-accesses",
             c"analyze-data-layout",
             Some(map.cast_const()),
         );

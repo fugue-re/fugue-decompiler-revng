@@ -27,6 +27,7 @@ impl<'ctx> FugueLifter<'ctx> {
         view: *const revng_sys::rp_binary_view,
         architecture: Architecture,
         entry: u64,
+        harvest_global_data: bool,
     ) -> Self {
         let handle = unsafe {
             bridge::fugue_lifter_new(
@@ -37,6 +38,7 @@ impl<'ctx> FugueLifter<'ctx> {
                 architecture.pc_csv(),
                 architecture.stack_pointer_csv(),
                 entry,
+                harvest_global_data,
             )
         };
         let handle = NonNull::new(handle as *mut State).expect("fugue_lifter_new returned null");
@@ -96,6 +98,7 @@ impl<'ctx> FugueLifter<'ctx> {
         return_address: u64,
         link_register: Option<PointerValue<'ctx>>,
         is_import: bool,
+        follow_callee: bool,
     ) {
         let link_register = link_register.map_or(0, |register| register.as_value_ref() as usize);
         unsafe {
@@ -106,12 +109,15 @@ impl<'ctx> FugueLifter<'ctx> {
                 return_address,
                 link_register,
                 is_import,
+                follow_callee,
             );
         }
     }
 
-    pub(crate) fn register_direct_jumps(&mut self) {
-        unsafe { bridge::fugue_lifter_register_direct_jumps(self.raw()) };
+    pub(crate) fn register_direct_jumps(&mut self) -> Vec<u64> {
+        let mut registered = Vec::new();
+        unsafe { bridge::fugue_lifter_register_direct_jumps(self.raw(), &mut registered) };
+        registered
     }
 
     pub(crate) fn finalise(&mut self) {

@@ -47,6 +47,10 @@ impl<'a> RegisterFile<'a> {
         self.space
     }
 
+    pub(crate) fn in_default_space(&self, varnode: &Varnode) -> bool {
+        self.language.in_default_space(varnode)
+    }
+
     pub(crate) fn user_operation(&self, id: u16) -> Option<&'static str> {
         self.language.user_op_by_id(id)
     }
@@ -84,6 +88,10 @@ fn csv_name(architecture: Architecture, name: &str) -> String {
 fn canonical_names(architecture: Architecture) -> Vec<String> {
     let fixed: &[&str] = match architecture {
         Architecture::AArch64 => &["pc", "sp", "NG", "ZR", "CY", "OV"],
+        Architecture::X86 => &[
+            "EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP", "EIP", "CF", "PF", "AF", "ZF",
+            "SF", "DF", "OF",
+        ],
         Architecture::X86_64 => &[
             "RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP", "RIP", "CF", "PF", "AF", "ZF",
             "SF", "DF", "OF",
@@ -92,6 +100,7 @@ fn canonical_names(architecture: Architecture) -> Vec<String> {
     let mut names: Vec<String> = fixed.iter().map(|name| (*name).to_owned()).collect();
     match architecture {
         Architecture::AArch64 => names.extend((0..=30).map(|index| format!("x{index}"))),
+        Architecture::X86 => {}
         Architecture::X86_64 => names.extend((8..=15).map(|index| format!("R{index}"))),
     }
     names
