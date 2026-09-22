@@ -12,7 +12,7 @@ use revng_sys::{
     rp_manager_add_function, rp_manager_add_imported_function, rp_manager_create_cabi_type,
     rp_manager_create_from_address_space, rp_manager_decompile_function_to_ptml,
     rp_manager_destroy, rp_manager_get_container_identifier_from_name,
-    rp_manager_get_kind_from_name, rp_manager_get_step_from_name, rp_manager_produce_artifact,
+    rp_manager_get_kind_from_name, rp_manager_get_step_from_name, rp_manager_produce_artefact,
     rp_manager_produce_targets, rp_manager_run_analysis, rp_manager_set_cabi_prototype,
     rp_manager_set_default_abi, rp_manager_set_function_prototype, rp_set_lifter,
     rp_simple_error_get_message, rp_step_get_container, rp_target, rp_target_create,
@@ -249,7 +249,7 @@ impl Manager {
     ) -> Result<Vec<u8>, Error> {
         let components: [*const c_char; 1] = [object.map_or(ptr::null(), CStr::as_ptr)];
         let buffer = unsafe {
-            rp_manager_produce_artifact(
+            rp_manager_produce_artefact(
                 self.manager,
                 step.as_ptr(),
                 container.as_ptr(),

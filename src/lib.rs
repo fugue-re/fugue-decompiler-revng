@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::sync::Once;
 
 use revng_sys::{
-    LLVMModuleRef, rp_binary_view, rp_initialize, rp_is_initialized, rp_lifter_callbacks,
+    LLVMModuleRef, rp_binary_view, rp_initialise, rp_is_initialised, rp_lifter_callbacks,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -487,13 +487,13 @@ unsafe fn first_entry(entries: *const *const c_char, count: u64) -> Option<u64> 
     u64::from_str_radix(address.strip_prefix("0x")?, 16).ok()
 }
 
-/// Brings revng up. `rp_initialize` runs once per process and takes over LLVM's
+/// Brings revng up. `rp_initialise` runs once per process and takes over LLVM's
 /// global state, so a host that shares the process must be able to say which of
 /// its signal handlers to keep.
 pub fn initialise(preserve_signals: &[i32]) -> Result<(), Error> {
     let mut outcome = Ok(());
     INIT.call_once(|| {
-        if unsafe { rp_is_initialized() } {
+        if unsafe { rp_is_initialised() } {
             return;
         }
         let program = env::args_os()
@@ -504,13 +504,13 @@ pub fn initialise(preserve_signals: &[i32]) -> Result<(), Error> {
         let argv = [program.as_ptr()];
         let mut signals = preserve_signals.to_vec();
         let started =
-            unsafe { rp_initialize(1, argv.as_ptr(), signals.len() as u32, signals.as_mut_ptr()) };
+            unsafe { rp_initialise(1, argv.as_ptr(), signals.len() as u32, signals.as_mut_ptr()) };
         if !started {
-            outcome = Err(Error::pipeline("rp_initialize failed"));
+            outcome = Err(Error::pipeline("rp_initialise failed"));
         }
     });
     outcome?;
-    if unsafe { rp_is_initialized() } {
+    if unsafe { rp_is_initialised() } {
         Ok(())
     } else {
         Err(Error::pipeline("revng is not initialised"))
