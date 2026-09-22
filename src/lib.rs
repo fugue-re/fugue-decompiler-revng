@@ -1,6 +1,23 @@
+use std::cell::RefCell;
+use std::collections::BTreeSet;
+use std::env;
+use std::ffi::{CStr, CString, c_char, c_void};
+use std::iter::once;
+use std::mem::take;
+use std::path::Path;
+use std::ptr;
+use std::rc::Rc;
+use std::sync::Once;
+
+use revng_sys::{
+    LLVMModuleRef, rp_binary_view, rp_initialize, rp_is_initialized, rp_lifter_callbacks,
+};
+use rustc_hash::{FxHashMap, FxHashSet};
+
 mod address_space;
 mod binary;
 mod bridge;
+mod codegen;
 mod error;
 mod lifter;
 mod manager;
@@ -9,19 +26,6 @@ mod prototype;
 mod ptml;
 mod translate;
 
-use std::cell::RefCell;
-use std::collections::BTreeSet;
-use std::ffi::{CStr, CString, c_char, c_void};
-use std::iter::once;
-use std::mem::take;
-use std::path::Path;
-use std::ptr;
-use std::rc::Rc;
-use std::sync::OnceLock;
-
-use revng_sys::{LLVMModuleRef, rp_binary_view, rp_initialize, rp_lifter_callbacks};
-use rustc_hash::{FxHashMap, FxHashSet};
-
 use crate::address_space::AddressSpace;
 use crate::lifter::FugueLifter;
 use crate::manager::Manager;
@@ -29,14 +33,22 @@ use crate::module::BorrowedModule;
 use crate::translate::{RegisterFile, TranslateError, lift};
 
 pub use binary::{Address, Architecture, Binary, FunctionSymbol, Segment};
+pub use codegen::{CodeFormat, compile, host_triple, optimise};
 pub use error::Error;
 pub use prototype::{Primitive, PrimitiveKind, Prototype, Struct, Type};
 pub use ptml::{Document, Location, Token};
+pub use translate::Untranslated;
+
+/// The pipeline description, taken from the SDK this was built against so the
+/// two cannot drift.
+const PIPELINE: &str = include_str!(concat!(env!("OUT_DIR"), "/pipeline.yml"));
+static INIT: Once = Once::new();
 
 pub struct Output {
     llvm_ir: String,
     c: String,
     ptml: String,
+    untranslated: Vec<Untranslated>,
 }
 
 impl Output {
@@ -55,6 +67,10 @@ impl Output {
     pub fn document(&self) -> Document {
         ptml::parse(&self.ptml)
     }
+
+    pub fn untranslated(&self) -> &[Untranslated] {
+        &self.untranslated
+    }
 }
 
 struct Import {
@@ -63,10 +79,17 @@ struct Import {
     prototype: Prototype,
 }
 
+struct DeclaredFunction {
+    address: Address,
+    prototype: Prototype,
+}
+
 pub struct Decompiler {
     binary: Rc<Binary>,
     abi: Option<String>,
     prototype: Option<Prototype>,
+    max_depth: Option<u32>,
+    declared: Vec<DeclaredFunction>,
     imports: Vec<Import>,
 }
 
@@ -76,6 +99,8 @@ impl Decompiler {
             binary: Rc::new(Binary::open(path)?),
             abi: None,
             prototype: None,
+            max_depth: None,
+            declared: Vec::new(),
             imports: Vec::new(),
         })
     }
@@ -89,12 +114,32 @@ impl Decompiler {
             binary: Rc::new(Binary::from_raw(bytes, base, architecture)?),
             abi: None,
             prototype: None,
+            max_depth: None,
+            declared: Vec::new(),
             imports: Vec::new(),
         })
     }
 
     pub fn with_abi(mut self, abi: impl Into<String>) -> Self {
         self.abi = Some(abi.into());
+        self
+    }
+
+    pub fn with_max_depth(mut self, depth: u32) -> Self {
+        self.max_depth = Some(depth);
+        self
+    }
+
+    pub fn with_returning_function(self, address: Address) -> Self {
+        let pointer_size = self.binary.architecture().pointer_size() as u16;
+        self.with_declared_function(
+            address,
+            Prototype::returning(Primitive::generic(pointer_size)),
+        )
+    }
+
+    pub fn with_declared_function(mut self, address: Address, prototype: Prototype) -> Self {
+        self.declared.push(DeclaredFunction { address, prototype });
         self
     }
 
@@ -130,17 +175,18 @@ impl Decompiler {
     }
 
     pub fn decompile_function(&self, address: Address) -> Result<Output, Error> {
-        self.build_harness(address.value())?
+        self.build_analysis(address.value())?
             .decompile(address.value())
     }
 
-    fn build_harness(&self, seed: u64) -> Result<Harness, Error> {
-        initialise()?;
+    fn build_analysis(&self, seed: u64) -> Result<Analysis, Error> {
+        initialise(&[])?;
         let architecture = self.binary.architecture();
         let pointer_size = architecture.pointer_size();
 
         let space = Box::new(AddressSpace::new(Rc::clone(&self.binary), seed));
-        let mut manager = Manager::create(&space.callbacks())?;
+        let pipeline = CString::new(PIPELINE).expect("the pipeline has no NUL");
+        let mut manager = Manager::create(&space.callbacks(), &pipeline)?;
 
         let abi = CString::new(self.abi.as_deref().unwrap_or(architecture.default_abi()))
             .expect("ABI name has no NUL");
@@ -164,6 +210,9 @@ impl Decompiler {
             error: CString::default(),
             llvm_ir: String::new(),
             functions: FxHashSet::default(),
+            lifted: FxHashSet::default(),
+            untranslated: Vec::new(),
+            max_depth: self.max_depth,
         };
         let callbacks = rp_lifter_callbacks {
             opaque: ptr::from_mut(&mut context).cast(),
@@ -176,9 +225,25 @@ impl Decompiler {
         covered.insert(seed);
         match &self.prototype {
             Some(prototype) => {
-                manager.set_prototype(&meta_address, &abi, prototype, pointer_size)?
+                manager.set_prototype(&meta_address, &abi, c"function", prototype, pointer_size)?
             }
             None => {
+                for DeclaredFunction { address, prototype } in self
+                    .declared
+                    .iter()
+                    .filter(|declared| context.lifted.contains(&declared.address.value()))
+                {
+                    let meta_address = CString::new(format!(
+                        "{:#x}:Code_{}",
+                        address.value(),
+                        architecture.revng_name()
+                    ))
+                    .expect("meta address has no NUL");
+                    let name = CString::new(format!("function_{:#x}", address.value()))
+                        .expect("function name has no NUL");
+                    manager.add_function(&meta_address, &name)?;
+                    manager.set_prototype(&meta_address, &abi, &name, prototype, pointer_size)?;
+                }
                 manager.detect_abi()?;
                 let functions = once(seed)
                     .chain(context.functions.iter().copied())
@@ -192,36 +257,40 @@ impl Decompiler {
                     .collect::<Vec<CString>>();
                 manager.run_data_layout(&functions)?;
                 manager.run_analysis(c"", c"convert-functions-to-cabi", None)?;
-                covered.extend(
-                    context
-                        .functions
-                        .iter()
-                        .copied()
-                        .filter(|target| !imports.contains_key(target)),
-                );
+                if self.max_depth.is_none() {
+                    covered.extend(
+                        context
+                            .functions
+                            .iter()
+                            .copied()
+                            .filter(|target| !imports.contains_key(target)),
+                    );
+                }
             }
         }
 
         let llvm_ir = take(&mut context.llvm_ir);
-        Ok(Harness {
+        let untranslated = take(&mut context.untranslated);
+        Ok(Analysis {
             manager,
             space,
             covered,
             architecture,
             llvm_ir,
+            untranslated,
         })
     }
 
     pub fn into_session(self) -> Session {
         Session {
             decompiler: self,
-            harness: RefCell::new(None),
+            analysis: RefCell::new(None),
             cache: RefCell::new(FxHashMap::default()),
         }
     }
 }
 
-struct Harness {
+struct Analysis {
     manager: Manager,
     // SAFETY: `manager`'s address-space callbacks retain raw pointers into this,
     // so it must outlive `manager` (which is dropped first, being declared before it).
@@ -230,11 +299,31 @@ struct Harness {
     covered: FxHashSet<u64>,
     architecture: Architecture,
     llvm_ir: String,
+    untranslated: Vec<Untranslated>,
 }
 
-impl Harness {
+impl Analysis {
     fn covers(&self, address: u64) -> bool {
         self.covered.contains(&address)
+    }
+
+    fn artefact(&mut self, stage: &str, container: &str, address: u64) -> Result<Vec<u8>, Error> {
+        let stage = CString::new(stage).map_err(|_| Error::pipeline("stage name has a NUL"))?;
+        let container =
+            CString::new(container).map_err(|_| Error::pipeline("container name has a NUL"))?;
+        let whole_binary = container.as_bytes() == b"llvm-root";
+        let kind = if whole_binary { c"binary" } else { c"function" };
+        let object = CString::new(format!(
+            "{address:#x}:Code_{}",
+            self.architecture.revng_name()
+        ))
+        .expect("meta address has no NUL");
+        self.manager.produce_artefact(
+            &stage,
+            &container,
+            kind,
+            (!whole_binary).then_some(object.as_c_str()),
+        )
     }
 
     fn decompile(&self, address: u64) -> Result<Output, Error> {
@@ -249,13 +338,14 @@ impl Harness {
             llvm_ir: self.llvm_ir.clone(),
             c,
             ptml,
+            untranslated: self.untranslated.clone(),
         })
     }
 }
 
 pub struct Session {
     decompiler: Decompiler,
-    harness: RefCell<Option<Harness>>,
+    analysis: RefCell<Option<Analysis>>,
     cache: RefCell<FxHashMap<u64, Rc<Output>>>,
 }
 
@@ -266,19 +356,35 @@ impl Session {
             return Ok(Rc::clone(output));
         }
 
-        let covered = matches!(&*self.harness.borrow(), Some(harness) if harness.covers(address));
-        if !covered {
-            let harness = self.decompiler.build_harness(address)?;
-            *self.harness.borrow_mut() = Some(harness);
-        }
+        self.ensure_analysis(address)?;
 
         let output = {
-            let harness = self.harness.borrow();
-            let harness = harness.as_ref().expect("a harness was built above");
-            Rc::new(harness.decompile(address)?)
+            let analysis = self.analysis.borrow();
+            let analysis = analysis.as_ref().expect("a analysis was built above");
+            Rc::new(analysis.decompile(address)?)
         };
         self.cache.borrow_mut().insert(address, Rc::clone(&output));
         Ok(output)
+    }
+
+    pub fn module(&self, address: Address, stage: &str, container: &str) -> Result<Vec<u8>, Error> {
+        let address = address.value();
+        self.ensure_analysis(address)?;
+        let mut analysis = self.analysis.borrow_mut();
+        analysis
+            .as_mut()
+            .expect("a analysis was built above")
+            .artefact(stage, container, address)
+    }
+
+    fn ensure_analysis(&self, address: u64) -> Result<(), Error> {
+        let covered =
+            matches!(&*self.analysis.borrow(), Some(analysis) if analysis.covers(address));
+        if !covered {
+            let analysis = self.decompiler.build_analysis(address)?;
+            *self.analysis.borrow_mut() = Some(analysis);
+        }
+        Ok(())
     }
 
     pub fn symbols(&self) -> &[FunctionSymbol] {
@@ -303,6 +409,9 @@ struct LiftContext<'a> {
     error: CString,
     llvm_ir: String,
     functions: FxHashSet<u64>,
+    lifted: FxHashSet<u64>,
+    untranslated: Vec<Untranslated>,
+    max_depth: Option<u32>,
 }
 
 impl LiftContext<'_> {
@@ -334,6 +443,7 @@ unsafe extern "C" fn lift_callback(
         binary,
         context.architecture,
         entry,
+        context.max_depth.is_none(),
     );
 
     let outcome = lift(
@@ -343,9 +453,13 @@ unsafe extern "C" fn lift_callback(
         context.imports,
         context.binary,
         &mut lifter,
+        entry,
+        context.max_depth,
     )
-    .and_then(|callees| {
-        context.functions = callees;
+    .and_then(|outcome| {
+        context.functions = outcome.callees;
+        context.lifted = outcome.lifted;
+        context.untranslated = outcome.untranslated;
         lifter.finalise();
         module.as_module().verify().map_err(TranslateError::Verify)
     });
@@ -373,22 +487,32 @@ unsafe fn first_entry(entries: *const *const c_char, count: u64) -> Option<u64> 
     u64::from_str_radix(address.strip_prefix("0x")?, 16).ok()
 }
 
-fn initialise() -> Result<(), Error> {
-    static INITIALISED: OnceLock<bool> = OnceLock::new();
-    let initialised = *INITIALISED.get_or_init(|| {
-        let pipeline = bridge::default_pipeline();
-        if pipeline.is_empty() {
-            return false;
+/// Brings revng up. `rp_initialize` runs once per process and takes over LLVM's
+/// global state, so a host that shares the process must be able to say which of
+/// its signal handlers to keep.
+pub fn initialise(preserve_signals: &[i32]) -> Result<(), Error> {
+    let mut outcome = Ok(());
+    INIT.call_once(|| {
+        if unsafe { rp_is_initialized() } {
+            return;
         }
-        let program = CString::new("revng-fugue").expect("program name has no NUL");
-        let pipeline =
-            CString::new(format!("--pipeline-path={pipeline}")).expect("pipeline path has no NUL");
-        let argv = [program.as_ptr(), pipeline.as_ptr()];
-        unsafe { rp_initialize(2, argv.as_ptr(), 0, ptr::null_mut()) }
+        let program = env::args_os()
+            .next()
+            .and_then(|name| name.into_string().ok())
+            .and_then(|name| CString::new(name).ok())
+            .unwrap_or_else(|| c"revng".into());
+        let argv = [program.as_ptr()];
+        let mut signals = preserve_signals.to_vec();
+        let started =
+            unsafe { rp_initialize(1, argv.as_ptr(), signals.len() as u32, signals.as_mut_ptr()) };
+        if !started {
+            outcome = Err(Error::pipeline("rp_initialize failed"));
+        }
     });
-    if initialised {
+    outcome?;
+    if unsafe { rp_is_initialized() } {
         Ok(())
     } else {
-        Err(Error::pipeline("rp_initialize failed"))
+        Err(Error::pipeline("revng is not initialised"))
     }
 }

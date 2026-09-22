@@ -30,12 +30,16 @@ impl AddressSpace {
         let entry = CString::new(format!("{entry:#x}:Code_{architecture_name}"))
             .expect("meta address has no NUL");
 
+        let generic_bits = binary.architecture().pointer_size() * 8;
         let mappings = binary
             .segments()
             .iter()
             .map(|segment| Mapping {
-                start: CString::new(format!("{:#x}:Generic64", segment.address().value()))
-                    .expect("meta address has no NUL"),
+                start: CString::new(format!(
+                    "{:#x}:Generic{generic_bits}",
+                    segment.address().value()
+                ))
+                .expect("meta address has no NUL"),
                 name: CString::new(segment.name().replace('\0', "_"))
                     .unwrap_or_else(|_| CString::new("segment").expect("segment name has no NUL")),
                 base: segment.address().value(),

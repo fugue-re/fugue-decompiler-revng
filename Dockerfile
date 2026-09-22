@@ -19,6 +19,11 @@ COPY . .
 RUN cargo build --bin revng-fugue
 
 RUN printf '\x89\x37\x89\x57\x08\xc7\x47\x10\x00\x00\x00\x00\xc3' > /tmp/stub.bin \
- && /work/target/debug/revng-fugue --raw --base 0x1000 --arch x86_64 -a 0x1000 /tmp/stub.bin
+ && /work/target/debug/revng-fugue --raw --base 0x1000 --arch x86_64 -a 0x1000 /tmp/stub.bin \
+      > /tmp/decompiled.c \
+ && cat /tmp/decompiled.c \
+ && grep -q 'offset_0 = ' /tmp/decompiled.c \
+ && grep -q 'offset_8 = ' /tmp/decompiled.c \
+ && grep -q 'offset_16 = ' /tmp/decompiled.c
 
 ENTRYPOINT ["/work/target/debug/revng-fugue"]

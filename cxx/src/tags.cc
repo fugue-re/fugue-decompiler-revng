@@ -27,7 +27,6 @@
 #include "revng/Support/BasicBlockID.h"
 #include "revng/Support/BlockType.h"
 #include "revng/Support/MetaAddress.h"
-#include "revng/Support/ResourceFinder.h"
 
 namespace revng_fugue {
 
@@ -80,6 +79,18 @@ static void set_csv_metadata(llvm::Function *Function, llvm::StringRef Kind,
   Function->setMetadata(Kind, llvm::MDTuple::get(Context, { Zero, Inner }));
 }
 
+void tag_pure_helper(std::uintptr_t Value) {
+  auto *Function = llvm::cast<llvm::Function>(
+      llvm::unwrap(reinterpret_cast<LLVMValueRef>(Value)));
+  FunctionTags::Helper.addTo(Function);
+  Function->setDoesNotThrow();
+  Function->setDoesNotAccessMemory();
+  Function->setWillReturn();
+  rust::Slice<const std::uintptr_t> None;
+  set_csv_metadata(Function, "revng.csvaccess.offsets.load", None);
+  set_csv_metadata(Function, "revng.csvaccess.offsets.store", None);
+}
+
 void emit_unsupported(std::uintptr_t BlockValue, rust::Str Name,
                       rust::Slice<const std::uintptr_t> Reads,
                       rust::Slice<const std::uintptr_t> Writes) {
@@ -101,11 +112,5 @@ void emit_unsupported(std::uintptr_t BlockValue, rust::Str Name,
   llvm::CallInst::Create(Function->getFunctionType(), Function, {}, "", Block);
 }
 
-rust::String default_pipeline() {
-  auto Path = revng::ResourceFinder.findFile("share/revng/pipeline.yml");
-  if (not Path or Path->empty())
-    return rust::String();
-  return rust::String(*Path);
-}
 
 }
