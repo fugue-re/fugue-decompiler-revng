@@ -1,11 +1,10 @@
-use std::cell::RefCell;
+use std::cell::{RefCell, UnsafeCell};
 use std::collections::BTreeSet;
 use std::env;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::iter::once;
 use std::mem::take;
 use std::path::Path;
-use std::ptr;
 use std::rc::Rc;
 use std::sync::Once;
 
@@ -201,25 +200,32 @@ impl Decompiler {
         let meta_address = CString::new(format!("{seed:#x}:Code_{}", architecture.revng_name()))
             .expect("meta address has no NUL");
 
-        let mut context = LiftContext {
-            binary: &self.binary,
-            registers: RegisterFile::build(self.binary.language(), architecture),
+        let context = Box::new(UnsafeCell::new(LiftContext {
+            binary: Rc::clone(&self.binary),
             architecture,
             entry: seed,
-            imports: &imports,
+            imports: imports.clone(),
             error: CString::default(),
             llvm_ir: String::new(),
             functions: FxHashSet::default(),
             lifted: FxHashSet::default(),
             untranslated: Vec::new(),
             max_depth: self.max_depth,
-        };
+        }));
         let callbacks = rp_lifter_callbacks {
-            opaque: ptr::from_mut(&mut context).cast(),
+            opaque: context.get().cast(),
             lift: Some(lift_callback),
         };
         manager.set_lifter(&callbacks)?;
         manager.produce_root()?;
+
+        // revng keeps `callbacks.opaque` and calls back into it whenever it
+        // re-lifts, so the context is only ever reached through that pointer
+        // and never through a reference that would invalidate it.
+        let (lifted, reached) = {
+            let state = unsafe { &*context.get() };
+            (state.lifted.clone(), state.functions.clone())
+        };
 
         let mut covered = FxHashSet::default();
         covered.insert(seed);
@@ -231,7 +237,7 @@ impl Decompiler {
                 for DeclaredFunction { address, prototype } in self
                     .declared
                     .iter()
-                    .filter(|declared| context.lifted.contains(&declared.address.value()))
+                    .filter(|declared| lifted.contains(&declared.address.value()))
                 {
                     let meta_address = CString::new(format!(
                         "{:#x}:Code_{}",
@@ -246,7 +252,7 @@ impl Decompiler {
                 }
                 manager.detect_abi()?;
                 let functions = once(seed)
-                    .chain(context.functions.iter().copied())
+                    .chain(reached.iter().copied())
                     .filter(|target| !imports.contains_key(target))
                     .collect::<BTreeSet<u64>>()
                     .into_iter()
@@ -255,12 +261,12 @@ impl Decompiler {
                             .expect("meta address has no NUL")
                     })
                     .collect::<Vec<CString>>();
-                manager.run_data_layout(&functions)?;
+                manager.run_function_analysis(c"detect-c-strings", &functions)?;
+                manager.run_function_analysis(c"analyze-data-layout", &functions)?;
                 manager.run_analysis(c"", c"convert-functions-to-cabi", None)?;
                 if self.max_depth.is_none() {
                     covered.extend(
-                        context
-                            .functions
+                        reached
                             .iter()
                             .copied()
                             .filter(|target| !imports.contains_key(target)),
@@ -269,11 +275,14 @@ impl Decompiler {
             }
         }
 
-        let llvm_ir = take(&mut context.llvm_ir);
-        let untranslated = take(&mut context.untranslated);
+        let (llvm_ir, untranslated) = {
+            let state = unsafe { &mut *context.get() };
+            (take(&mut state.llvm_ir), take(&mut state.untranslated))
+        };
         Ok(Analysis {
             manager,
             space,
+            context,
             covered,
             architecture,
             llvm_ir,
@@ -296,6 +305,10 @@ struct Analysis {
     // so it must outlive `manager` (which is dropped first, being declared before it).
     #[allow(dead_code)]
     space: Box<AddressSpace>,
+    // SAFETY: the lifter callback keeps a raw pointer into this for as long as
+    // the manager can re-lift, which outlives the call that built it.
+    #[allow(dead_code)]
+    context: Box<UnsafeCell<LiftContext>>,
     covered: FxHashSet<u64>,
     architecture: Architecture,
     llvm_ir: String,
@@ -400,12 +413,11 @@ impl Session {
     }
 }
 
-struct LiftContext<'a> {
-    binary: &'a Binary,
-    registers: RegisterFile<'a>,
+struct LiftContext {
+    binary: Rc<Binary>,
     architecture: Architecture,
     entry: u64,
-    imports: &'a FxHashMap<u64, String>,
+    imports: FxHashMap<u64, String>,
     error: CString,
     llvm_ir: String,
     functions: FxHashSet<u64>,
@@ -414,7 +426,7 @@ struct LiftContext<'a> {
     max_depth: Option<u32>,
 }
 
-impl LiftContext<'_> {
+impl LiftContext {
     fn fail(&mut self, message: &str, error_message: *mut *const c_char) -> bool {
         self.error = CString::new(message.replace('\0', "\\0")).expect("NUL bytes were replaced");
         if !error_message.is_null() {
@@ -446,12 +458,13 @@ unsafe extern "C" fn lift_callback(
         context.max_depth.is_none(),
     );
 
+    let registers = RegisterFile::build(context.binary.language(), context.architecture);
     let outcome = lift(
         module.as_module(),
         context.architecture,
-        &context.registers,
-        context.imports,
-        context.binary,
+        &registers,
+        &context.imports,
+        &context.binary,
         &mut lifter,
         entry,
         context.max_depth,

@@ -289,7 +289,11 @@ impl Manager {
         result
     }
 
-    pub(crate) fn run_data_layout(&mut self, functions: &[CString]) -> Result<(), Error> {
+    pub(crate) fn run_function_analysis(
+        &mut self,
+        analysis: &CStr,
+        functions: &[CString],
+    ) -> Result<(), Error> {
         let step = unsafe {
             rp_manager_get_step_from_name(self.manager, c"segregate-stack-accesses".as_ptr())
         };
@@ -315,7 +319,7 @@ impl Manager {
             .collect::<Vec<_>>();
         let result = self.run_analysis(
             c"segregate-stack-accesses",
-            c"analyze-data-layout",
+            analysis,
             Some(map.cast_const()),
         );
         unsafe {

@@ -1,5 +1,3 @@
-//! Decompiles the same function in several threads, each with its own
-//! `Decompiler`, to check that concurrent analyses do not interfere.
 use std::thread;
 
 use revng_fugue::{Address, Architecture, Decompiler};
