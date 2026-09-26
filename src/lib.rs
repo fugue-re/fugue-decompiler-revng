@@ -1,8 +1,6 @@
 use std::cell::{RefCell, UnsafeCell};
-use std::collections::BTreeSet;
 use std::env;
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::iter::once;
 use std::mem::take;
 use std::path::Path;
 use std::rc::Rc;
@@ -217,7 +215,7 @@ impl Decompiler {
             lift: Some(lift_callback),
         };
         manager.set_lifter(&callbacks)?;
-        manager.produce_root()?;
+        manager.produce_artefact(c"lift", None)?;
 
         // revng keeps `callbacks.opaque` and calls back into it whenever it
         // re-lifts, so the context is only ever reached through that pointer
@@ -250,20 +248,10 @@ impl Decompiler {
                     manager.add_function(&meta_address, &name)?;
                     manager.set_prototype(&meta_address, &abi, &name, prototype, pointer_size)?;
                 }
-                manager.detect_abi()?;
-                let functions = once(seed)
-                    .chain(reached.iter().copied())
-                    .filter(|target| !imports.contains_key(target))
-                    .collect::<BTreeSet<u64>>()
-                    .into_iter()
-                    .map(|target| {
-                        CString::new(format!("{target:#x}:Code_{}", architecture.revng_name()))
-                            .expect("meta address has no NUL")
-                    })
-                    .collect::<Vec<CString>>();
-                manager.run_function_analysis(c"detect-c-strings", &functions)?;
-                manager.run_function_analysis(c"analyze-data-layout", &functions)?;
-                manager.run_analysis(c"", c"convert-functions-to-cabi", None)?;
+                manager.run_analysis(c"detect-abi")?;
+                manager.run_analysis(c"detect-c-strings")?;
+                manager.run_analysis(c"analyze-data-layout")?;
+                manager.run_analysis(c"convert-functions-to-cabi")?;
                 if self.max_depth.is_none() {
                     covered.extend(
                         reached
@@ -320,23 +308,16 @@ impl Analysis {
         self.covered.contains(&address)
     }
 
-    fn artefact(&mut self, stage: &str, container: &str, address: u64) -> Result<Vec<u8>, Error> {
-        let stage = CString::new(stage).map_err(|_| Error::pipeline("stage name has a NUL"))?;
-        let container =
-            CString::new(container).map_err(|_| Error::pipeline("container name has a NUL"))?;
-        let whole_binary = container.as_bytes() == b"llvm-root";
-        let kind = if whole_binary { c"binary" } else { c"function" };
+    fn artefact(&mut self, artefact: &str, address: u64) -> Result<Vec<u8>, Error> {
+        let artefact =
+            CString::new(artefact).map_err(|_| Error::pipeline("artefact name has a NUL"))?;
         let object = CString::new(format!(
             "{address:#x}:Code_{}",
             self.architecture.revng_name()
         ))
         .expect("meta address has no NUL");
-        self.manager.produce_artefact(
-            &stage,
-            &container,
-            kind,
-            (!whole_binary).then_some(object.as_c_str()),
-        )
+        self.manager
+            .produce_artefact(&artefact, Some(object.as_c_str()))
     }
 
     fn decompile(&self, address: u64) -> Result<Output, Error> {
@@ -380,14 +361,14 @@ impl Session {
         Ok(output)
     }
 
-    pub fn module(&self, address: Address, stage: &str, container: &str) -> Result<Vec<u8>, Error> {
+    pub fn module(&self, address: Address, artefact: &str) -> Result<Vec<u8>, Error> {
         let address = address.value();
         self.ensure_analysis(address)?;
         let mut analysis = self.analysis.borrow_mut();
         analysis
             .as_mut()
             .expect("a analysis was built above")
-            .artefact(stage, container, address)
+            .artefact(artefact, address)
     }
 
     fn ensure_analysis(&self, address: u64) -> Result<(), Error> {

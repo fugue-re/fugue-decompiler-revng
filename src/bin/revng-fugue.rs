@@ -87,15 +87,9 @@ fn command() -> Command {
                 .help("Override the default ABI (e.g. SystemV_x86_64, AAPCS64)"),
         )
         .arg(
-            Arg::new("stage")
-                .long("stage")
-                .help("Savepoint to take the module from instead of decompiling"),
-        )
-        .arg(
-            Arg::new("container")
-                .long("container")
-                .default_value("llvm-functions")
-                .help("Container to read at --stage"),
+            Arg::new("artefact")
+                .long("artefact")
+                .help("Artefact to produce instead of decompiling"),
         )
         .arg(
             Arg::new("passes")
@@ -200,7 +194,7 @@ fn run() -> Result<(), CliError> {
 
     let emit = matches.get_one::<String>("emit").map(String::as_str);
     let session = decompiler.into_session();
-    if matches.contains_id("stage") {
+    if matches.contains_id("artefact") {
         return emit_modules(&session, &addresses, &matches);
     }
     for address in addresses {
@@ -220,12 +214,9 @@ fn emit_modules(
     addresses: &[Address],
     matches: &ArgMatches,
 ) -> Result<(), CliError> {
-    let stage = matches
-        .get_one::<String>("stage")
-        .expect("stage is present");
-    let container = matches
-        .get_one::<String>("container")
-        .expect("container has a default");
+    let artefact = matches
+        .get_one::<String>("artefact")
+        .expect("artefact is present");
     let triple = matches.get_one::<String>("triple").map(String::as_str);
     let passes = matches.get_one::<String>("passes").map(String::as_str);
     let host = revng_fugue::host_triple();
@@ -233,7 +224,7 @@ fn emit_modules(
     let assembly = matches.get_one::<String>("emit").map(String::as_str) == Some("asm");
 
     for address in addresses {
-        let module = session.module(*address, stage, container)?;
+        let module = session.module(*address, artefact)?;
         let bytes = match triple {
             Some(triple) => {
                 let format = if assembly {
