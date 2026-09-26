@@ -1,5 +1,4 @@
-use fugue_core::il::pcode::Varnode;
-use fugue_core::lifter::Language;
+use fugue_core::lifter::{Language, Varnode};
 
 use crate::binary::Architecture;
 

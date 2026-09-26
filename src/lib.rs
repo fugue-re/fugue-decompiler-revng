@@ -88,6 +88,7 @@ pub struct Decompiler {
     max_depth: Option<u32>,
     declared: Vec<DeclaredFunction>,
     imports: Vec<Import>,
+    options: Vec<String>,
 }
 
 impl Decompiler {
@@ -99,6 +100,7 @@ impl Decompiler {
             max_depth: None,
             declared: Vec::new(),
             imports: Vec::new(),
+            options: Vec::new(),
         })
     }
 
@@ -114,11 +116,18 @@ impl Decompiler {
             max_depth: None,
             declared: Vec::new(),
             imports: Vec::new(),
+            options: Vec::new(),
         })
     }
 
     pub fn with_abi(mut self, abi: impl Into<String>) -> Self {
         self.abi = Some(abi.into());
+        self
+    }
+
+    /// Pass an option through to revng, e.g. `-debug-log=detect-c-strings`.
+    pub fn with_option(mut self, option: impl Into<String>) -> Self {
+        self.options.push(option.into());
         self
     }
 
@@ -177,7 +186,7 @@ impl Decompiler {
     }
 
     fn build_analysis(&self, seed: u64) -> Result<Analysis, Error> {
-        initialise(&[])?;
+        initialise(&[], &self.options)?;
         let architecture = self.binary.architecture();
         let pointer_size = architecture.pointer_size();
 
@@ -250,7 +259,9 @@ impl Decompiler {
                 }
                 manager.run_analysis(c"detect-abi")?;
                 manager.run_analysis(c"detect-c-strings")?;
+                manager.run_analysis(c"detect-segment-globals")?;
                 manager.run_analysis(c"analyze-data-layout")?;
+                manager.run_analysis(c"name-segment-globals")?;
                 manager.run_analysis(c"convert-functions-to-cabi")?;
                 if self.max_depth.is_none() {
                     covered.extend(
@@ -484,7 +495,9 @@ unsafe fn first_entry(entries: *const *const c_char, count: u64) -> Option<u64> 
 /// Brings revng up. `rp_initialise` runs once per process and takes over LLVM's
 /// global state, so a host that shares the process must be able to say which of
 /// its signal handlers to keep.
-pub fn initialise(preserve_signals: &[i32]) -> Result<(), Error> {
+/// `options` are passed to revng as command-line arguments, which is how its
+/// `llvm::cl` settings are reached: `-debug-log=<logger>` and friends.
+pub fn initialise(preserve_signals: &[i32], options: &[String]) -> Result<(), Error> {
     let mut outcome = Ok(());
     INIT.call_once(|| {
         if unsafe { rp_is_initialised() } {
@@ -495,10 +508,25 @@ pub fn initialise(preserve_signals: &[i32]) -> Result<(), Error> {
             .and_then(|name| name.into_string().ok())
             .and_then(|name| CString::new(name).ok())
             .unwrap_or_else(|| c"revng".into());
-        let argv = [program.as_ptr()];
+        let owned = options
+            .iter()
+            .map(|option| CString::new(option.as_str()))
+            .collect::<Result<Vec<CString>, _>>();
+        let Ok(owned) = owned else {
+            outcome = Err(Error::pipeline("a revng option has a NUL"));
+            return;
+        };
+        let mut argv = vec![program.as_ptr()];
+        argv.extend(owned.iter().map(|option| option.as_ptr()));
         let mut signals = preserve_signals.to_vec();
-        let started =
-            unsafe { rp_initialise(1, argv.as_ptr(), signals.len() as u32, signals.as_mut_ptr()) };
+        let started = unsafe {
+            rp_initialise(
+                argv.len() as i32,
+                argv.as_ptr(),
+                signals.len() as u32,
+                signals.as_mut_ptr(),
+            )
+        };
         if !started {
             outcome = Err(Error::pipeline("rp_initialise failed"));
         }

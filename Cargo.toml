@@ -10,7 +10,7 @@ include = ["/build.rs", "/cxx", "/src", "/tests"]
 clap = "4"
 cxx = "1"
 fallible-iterator = "0.3"
-fugue-core = { git = "https://github.com/fugue-re/fugue-core-next", branch = "feature/overlapping-segments", features = ["static-lifters"] }
+fugue-core = { git = "https://github.com/fugue-re/fugue-core-next", branch = "dev", features = ["static-lifters"] }
 inkwell = { version = "0.9", default-features = false, features = [
     "llvm16-0-no-llvm-linking",
     "target-aarch64",

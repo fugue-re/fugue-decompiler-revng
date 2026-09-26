@@ -1,5 +1,5 @@
 use fugue_core::loader::LoaderError;
-use fugue_core::storage::segments::SegmentStorageError;
+use fugue_core::storage::SegmentStorageError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

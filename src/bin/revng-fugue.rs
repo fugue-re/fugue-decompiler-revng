@@ -87,6 +87,13 @@ fn command() -> Command {
                 .help("Override the default ABI (e.g. SystemV_x86_64, AAPCS64)"),
         )
         .arg(
+            Arg::new("revng-option")
+                .long("revng-option")
+                .action(ArgAction::Append)
+                .allow_hyphen_values(true)
+                .help("Pass an option through to revng, e.g. -debug-log=<logger>"),
+        )
+        .arg(
             Arg::new("artefact")
                 .long("artefact")
                 .help("Artefact to produce instead of decompiling"),
@@ -156,6 +163,12 @@ fn load(matches: &ArgMatches) -> Result<Decompiler, CliError> {
         .copied()
         .fold(decompiler, |decompiler, address| {
             decompiler.with_returning_function(Address::new(address))
+        });
+    let decompiler = matches
+        .get_many::<String>("revng-option")
+        .unwrap_or_default()
+        .fold(decompiler, |decompiler, option| {
+            decompiler.with_option(option.clone())
         });
     let decompiler = match matches.get_one::<u32>("depth") {
         Some(depth) => decompiler.with_max_depth(*depth),

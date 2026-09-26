@@ -1,8 +1,7 @@
 use std::cmp::Ordering;
 use std::num::NonZeroU32;
 
-use fugue_core::il::pcode::{Op, PCodeOp, Varnode};
-use fugue_core::lifter::Lifter;
+use fugue_core::lifter::{Lifter, Op, RawPCodeOp as PCodeOp, Varnode};
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::ContextRef;
@@ -95,7 +94,7 @@ impl Lifted {
 
         let bytes = &buffer[..read];
         let mut operations = Vec::new();
-        match lifter.lift_into(address, bytes, &mut operations) {
+        match lifter.lift(address, bytes, &mut operations) {
             Ok(length) => Self {
                 address,
                 size: length as u8,

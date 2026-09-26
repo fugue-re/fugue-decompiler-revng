@@ -2,10 +2,9 @@ use std::fmt;
 use std::path::Path;
 
 use fallible_iterator::FallibleIterator;
-use fugue_core::ir::SegmentProperties;
 use fugue_core::lifter::{Language, Lifter};
 use fugue_core::loader::{Loadable, Loader, Shellcode};
-use fugue_core::storage::segments::{DefaultTransientSegmentStorage, SegmentStorage};
+use fugue_core::storage::{DefaultTransientSegmentStorage, SegmentProperties, SegmentStorage};
 use fugue_core::types::AttributeMap;
 
 use crate::error::Error;
